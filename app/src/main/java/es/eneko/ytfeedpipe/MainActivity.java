@@ -3,11 +3,15 @@ package es.eneko.ytfeedpipe;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
@@ -16,6 +20,12 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.CheckBox;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.SeekBar;
+import android.widget.Switch;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayInputStream;
@@ -52,7 +62,11 @@ public class MainActivity extends Activity {
         super.onCreate(state);
 
         web = new WebView(this);
-        setContentView(web);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(web);
+        root.addView(makeBoostButton());
+        setContentView(root);
+        BoostService.sync(this);   // reanuda el boost si estaba activado
 
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -167,6 +181,103 @@ public class MainActivity extends Activity {
             try { startActivity(Intent.createChooser(i, "Abrir con")); }
             catch (ActivityNotFoundException ignored) { }
         }
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    /** Botón flotante semitransparente en el borde derecho que abre el control de boost. */
+    private TextView makeBoostButton() {
+        TextView b = new TextView(this);
+        b.setText("🔊");
+        b.setTextSize(18);
+        b.setGravity(Gravity.CENTER);
+        b.setBackgroundColor(0x99000000);
+        b.setAlpha(0.7f);
+        b.setOnClickListener(v -> showBoostDialog());
+        b.setLayoutParams(new FrameLayout.LayoutParams(
+                dp(40), dp(40), Gravity.END | Gravity.CENTER_VERTICAL));
+        return b;
+    }
+
+    private void showBoostDialog() {
+        final SharedPreferences p = getSharedPreferences(BoostService.PREFS, MODE_PRIVATE);
+        final int step = 10;
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+        box.setPadding(pad, pad, pad, 0);
+
+        final Switch on = new Switch(this);
+        on.setText("Amplificar por encima del 100%");
+        on.setChecked(p.getBoolean(BoostService.KEY_ENABLED, false));
+
+        final TextView label = new TextView(this);
+        label.setPadding(0, pad, 0, 0);
+        label.setTextSize(16);
+
+        final SeekBar bar = new SeekBar(this);
+        bar.setMax((BoostService.MAX_PERCENT - BoostService.MIN_PERCENT) / step);
+        int pct = p.getInt(BoostService.KEY_PERCENT, 200);
+        bar.setProgress((pct - BoostService.MIN_PERCENT) / step);
+        label.setText("Volumen: " + pct + "%");
+
+        final CheckBox global = new CheckBox(this);
+        global.setText("Modo global (todo el sistema; según dispositivo)");
+        global.setChecked(p.getBoolean(BoostService.KEY_GLOBAL, false));
+
+        final TextView status = new TextView(this);
+        status.setPadding(0, pad / 2, 0, 0);
+
+        box.addView(on);
+        box.addView(label);
+        box.addView(bar);
+        box.addView(global);
+        box.addView(status);
+
+        on.setOnCheckedChangeListener((v, checked) -> {
+            p.edit().putBoolean(BoostService.KEY_ENABLED, checked).apply();
+            if (checked && Build.VERSION.SDK_INT >= 33) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+            }
+            BoostService.sync(this);
+        });
+        global.setOnCheckedChangeListener((v, checked) -> {
+            p.edit().putBoolean(BoostService.KEY_GLOBAL, checked).apply();
+            BoostService.sync(this);
+        });
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                int value = BoostService.MIN_PERCENT + progress * step;
+                label.setText("Volumen: " + value + "%");
+                if (!fromUser) return;
+                p.edit().putInt(BoostService.KEY_PERCENT, value).apply();
+                BoostService.sync(MainActivity.this);   // se aplica en vivo
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { }
+            @Override public void onStopTrackingTouch(SeekBar s) { }
+        });
+
+        final AlertDialog d = new AlertDialog.Builder(this)
+                .setTitle("Boost de volumen")
+                .setView(box)
+                .setPositiveButton("Cerrar", null)
+                .create();
+
+        // Refresca el estado mientras el diálogo esté abierto.
+        final Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                if (!d.isShowing()) return;
+                status.setText("Estado: " + BoostService.status);
+                status.postDelayed(this, 500);
+            }
+        };
+        d.setOnShowListener(x -> tick.run());
+        d.show();
     }
 
     @Override
